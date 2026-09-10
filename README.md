@@ -59,16 +59,21 @@ is `[0x04, mode, u16le voltage x0.1V, u16le current x0.1A, u16le power x0.1W, ..
 | TLV tag | Field |
 | --- | --- |
 | `A2` | battery percent (`data[0]`) |
+| `A5` | total input power (`x0.1 W`) |
 | `A6` | total output power (`x0.1 W`) |
+| `A7` | input source (pogo-pin Base, or a C port used for charging): `[04, mode, V, A, W]` |
 | `A8` | USB-C1 port |
 | `A9` | USB-C2 port |
-| `A7` | USB-A port |
 | `AF` / `B0` | temperature 1 / 2 (deg C) |
-| `A3` / `A5` | input-side power scalars (tentative; confirm with a charge test) |
 
-Verified live against the device: e.g. USB-C1 `15.0 V / 1.0 A / 15.5 W`, USB-C2 `5.0 V / 0.4 A / 2.2 W`, total output
-matching the sum, battery and two temperatures all correct. Port labels C1/C2 were confirmed against the on-device
-screen readout. Mapping the input-side fields (`A3` / `A5`) still needs a capture while the bank is charging.
+Input paths on this model: the pogo-pin **Base**, and **USB-C1 / USB-C2** (bidirectional). **USB-A is output-only.**
+When the Base is charging, its voltage/current/power appear in `A7` and are counted in the `A5` total. USB-A telemetry
+was not captured (nothing was ever plugged into it during testing), so no fixed tag is claimed for it.
+
+Verified live against the device: USB-C1 `15.0 V / 1.0 A / 15.5 W`, USB-C2 `5.0 V / 0.4 A / 2.2 W` (labels confirmed
+against the on-device screen readout, `C1:18W / C2:2.3W`); and while charging from the Base, total input `12.6 W`
+(`A5`) with source `21.8 V / 0.5 A` (`A7`) against total output `10.1 W` (`A6`) at 100% battery, i.e. pass-through.
+Battery percent and both temperatures also read correctly.
 
 # WebTool
 

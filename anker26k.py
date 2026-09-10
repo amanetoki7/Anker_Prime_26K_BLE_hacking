@@ -16,12 +16,14 @@ Telemetry (firmware v0.0.5.2), all under group 0x11, AES-CBC encrypted:
   * cmd 0x0700 -> response 0x0300 : live power status; the device then STREAMS 0x0300 frames.
   Live-frame TLVs (each value = [type_byte, data...]; type 0x04 = struct):
     A2 = battery %            (data[0])
+    A5 = total input power    ([04, mode, u16le x0.1 W])   (0 while discharging)
     A6 = total output power   ([04, mode, u16le x0.1 W])
-    A8 = USB-C1 port          ([04, mode, u16le V x0.1, u16le A x0.1, u16le W x0.1, ...])
-    A9 = USB-C2 port          (same layout)
-    A7 = USB-A port           (idle here; layout to confirm under load)
-    A3 / A5 = input-side power scalars (0 while discharging; confirm with a charge test)
+    A7 = input source         ([04, mode, u16le V x0.1, u16le A x0.1, u16le W x0.1, ...])
+                              (pogo-pin Base, or a C port used to charge the bank)
+    A8 = USB-C1 port          (same port layout as A7)
+    A9 = USB-C2 port          (same port layout)
     AF = temperature 1 (C),  B0 = temperature 2 (C)
+  Input paths: pogo Base + USB-C1/C2 (bidirectional). USB-A is output-only and was not captured.
 """
 import asyncio, sys, struct, time
 from bleak import BleakClient, BleakScanner
@@ -91,12 +93,11 @@ def parse_live(payload):
     d = {}
     for t, v in parse_tlv(payload, off):
         if t == 0xA2 and len(v) >= 2: d['battery'] = v[1]
+        elif t == 0xA5 and len(v) >= 4: d['in_W'] = round(u16(v, 2) / 10.0, 2)
         elif t == 0xA6 and len(v) >= 4: d['out_W'] = round(u16(v, 2) / 10.0, 2)
-        elif t == 0xA3 and len(v) >= 4: d['in_A3_W'] = round(u16(v, 2) / 10.0, 2)
-        elif t == 0xA5 and len(v) >= 4: d['in_A5_W'] = round(u16(v, 2) / 10.0, 2)
+        elif t == 0xA7: d['base_in'] = decode_port(v)
         elif t == 0xA8: d['C1'] = decode_port(v)
         elif t == 0xA9: d['C2'] = decode_port(v)
-        elif t == 0xA7: d['A'] = decode_port(v)
         elif t == 0xAF and len(v) >= 2: d['temp1'] = v[1]
         elif t == 0xB0 and len(v) >= 2: d['temp2'] = v[1]
     return d
@@ -204,11 +205,14 @@ async def run(addr, monitor, duration):
                 continue
             d = parse_live(payload)
             line = (f"[{time.strftime('%H:%M:%S')}] battery {d.get('battery')}%   "
-                    f"out {d.get('out_W')}W   temp {d.get('temp1')}/{d.get('temp2')}C")
+                    f"in {d.get('in_W')}W   out {d.get('out_W')}W   "
+                    f"temp {d.get('temp1')}/{d.get('temp2')}C")
             print(line)
-            print(fmt_port("USB-C1", d.get('C1')))
-            print(fmt_port("USB-C2", d.get('C2')))
-            print(fmt_port("USB-A ", d.get('A')))
+            print(fmt_port("USB-C1 ", d.get('C1')))
+            print(fmt_port("USB-C2 ", d.get('C2')))
+            bi = d.get('base_in')
+            if bi and bi['mode'] != 'off':
+                print(fmt_port("Base in", bi))
             shown = True
             if not monitor:
                 break

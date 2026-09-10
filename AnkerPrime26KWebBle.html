@@ -420,7 +420,7 @@
                             class="value status-inactive">N/A</span></div>
                 </div>
                 <div class="port-card" id="portA">
-                    <h3>USB-A</h3>
+                    <h3>Base / Input</h3>
                     <div class="status-item"><span class="label">Mode</span><span id="statusUsbAMode"
                             class="value status-inactive">N/A</span></div>
                     <div class="status-item"><span class="label">Voltage</span><span id="statusUsbAVoltage"
@@ -660,36 +660,35 @@
         // 26250mAh (fw v0.0.5.2) live/full telemetry parser.
         // Each TLV value = [typeByte, data...]; typeByte 0x04 marks a struct.
         // Port struct: [0x04, mode, u16le V x0.1, u16le A x0.1, u16le W x0.1, ...]. mode!=0 => active.
-        // Tags: A2 battery%, A6 total output(x0.1W), A8 USB-C1, A9 USB-C2, A7 USB-A,
-        //       A3/A5 input-side scalars (tentative), AF/B0 temperatures (C).
+        // Tags: A2 battery%, A5 total input(x0.1W), A6 total output(x0.1W),
+        //       A7 input source (pogo Base / C-port charging), A8 USB-C1, A9 USB-C2,
+        //       AF/B0 temperatures (C). USB-A is output-only and is not captured here.
         function parseLive26k(payload) {
             const off = (payload.length > 0 && payload[0] === 0x00) ? 1 : 0;
             const ns = JSON.parse(JSON.stringify(initialPowerStatus));
             const u16 = (v, o) => v.length >= o + 2 ? (v[o] | (v[o + 1] << 8)) : 0;
-            const port = (v) => {
+            const port = (v, dir) => {
                 if (v.length < 8 || v[0] !== 0x04 || v[1] === 0) return { mode: 'Off', voltage: 'N/A', current: 'N/A', power: 'N/A' };
                 return {
-                    mode: 'Output',
+                    mode: dir || 'Output',
                     voltage: (u16(v, 2) / 10).toFixed(2) + ' V',
                     current: (u16(v, 4) / 10).toFixed(3) + ' A',
                     power: (u16(v, 6) / 10).toFixed(2) + ' W'
                 };
             };
-            let inW = 0, t1 = null, t2 = null;
+            let t1 = null, t2 = null;
             for (const { type, value } of _parseTlvGenerator(payload, off)) {
                 switch (type) {
                     case 0xA2: if (value.length >= 2) ns.batteryLevel = value[1] + ' %'; break;
+                    case 0xA5: if (value.length >= 4) ns.totalInputPower = (u16(value, 2) / 10).toFixed(2) + ' W'; break;
                     case 0xA6: if (value.length >= 4) ns.totalOutputPower = (u16(value, 2) / 10).toFixed(2) + ' W'; break;
-                    case 0xA3: if (value.length >= 4) inW += u16(value, 2); break;
-                    case 0xA5: if (value.length >= 4) inW += u16(value, 2); break;
+                    case 0xA7: ns.portA = port(value, 'Input'); break;  // pogo Base / C-port charging
                     case 0xA8: ns.portC1 = port(value); break;
                     case 0xA9: ns.portC2 = port(value); break;
-                    case 0xA7: ns.portA = port(value); break;
                     case 0xAF: if (value.length >= 2) t1 = value[1]; break;
                     case 0xB0: if (value.length >= 2) t2 = value[1]; break;
                 }
             }
-            ns.totalInputPower = (inW / 10).toFixed(2) + ' W';
             if (t1 !== null) ns.temperature = t1 + '°C' + (t2 !== null ? ' / ' + t2 + '°C' : '');
             powerStatus = ns;
             updateStatusDisplay();
