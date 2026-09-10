@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Anker Prime 26250mAh (26K) BLE client.
+Anker Prime 26250mAh (26K) BLE client + live telemetry monitor.
 
 Adapted from atc1441's 27650mAh WebBluetooth tool. Model differences handled here:
   * GATT service  : 8c850001-0302-41c5-b46e-cf057c562025   (27650 used 22150001-4002-81c5-...)
@@ -8,7 +8,20 @@ Adapted from atc1441's 27650mAh WebBluetooth tool. Model differences handled her
   * notify char   : 8c850003-0302-41c5-b46e-cf057c562025
   * advertised svc: 0xFF09                                  (27650 advertised 0x2215)
   * AES-CBC IV    : FIRST 16 bytes of the 17-byte serial    (27650 serial was 16 bytes)
-Everything else (0xff09 framing, XOR checksum, static key, TLV handshake) is identical.
+  * telemetry     : firmware v0.0.5.2 uses different commands / TLV layout than the 27650
+                    (see decode below). The 27650 status command 0x0500 only returns an ack.
+
+Telemetry (firmware v0.0.5.2), all under group 0x11, AES-CBC encrypted:
+  * cmd 0x0200 -> response 0x0A00 : full status snapshot (settings, battery, temps, limits)
+  * cmd 0x0700 -> response 0x0300 : live power status; the device then STREAMS 0x0300 frames.
+  Live-frame TLVs (each value = [type_byte, data...]; type 0x04 = struct):
+    A2 = battery %            (data[0])
+    A6 = total output power   ([04, mode, u16le x0.1 W])
+    A8 = USB-C1 port          ([04, mode, u16le V x0.1, u16le A x0.1, u16le W x0.1, ...])
+    A9 = USB-C2 port          (same layout)
+    A7 = USB-A port           (idle here; layout to confirm under load)
+    A3 / A5 = input-side power scalars (0 while discharging; confirm with a charge test)
+    AF = temperature 1 (C),  B0 = temperature 2 (C)
 """
 import asyncio, sys, struct, time
 from bleak import BleakClient, BleakScanner
@@ -51,7 +64,7 @@ def dec(key, iv, ct):
     except Exception:
         return raw
 
-def parse_tlv(p, off):
+def parse_tlv(p, off=0):
     i, out = off, []
     while i < len(p) - 1:
         t, ln = p[i], p[i+1]
@@ -59,94 +72,105 @@ def parse_tlv(p, off):
         out.append((t, p[i+2:i+2+ln])); i += 2 + ln
     return out
 
+def u16(b, o=0): return struct.unpack_from('<H', b, o)[0] if len(b) >= o + 2 else 0
+
+def decode_port(v):
+    """type-0x04 port struct: [04, mode, Vx0.1(u16), Ax0.1(u16), Wx0.1(u16), tail]"""
+    if len(v) < 8 or v[0] != 0x04:
+        return {'mode': 'off', 'V': 0.0, 'A': 0.0, 'W': 0.0}
+    on = v[1] != 0
+    return {
+        'mode': 'output' if on else 'off',
+        'V': round(u16(v, 2) / 10.0, 2),
+        'A': round(u16(v, 4) / 10.0, 3),
+        'W': round(u16(v, 6) / 10.0, 2),
+    }
+
+def parse_live(payload):
+    off = 1 if (payload and payload[0] == 0x00) else 0
+    d = {}
+    for t, v in parse_tlv(payload, off):
+        if t == 0xA2 and len(v) >= 2: d['battery'] = v[1]
+        elif t == 0xA6 and len(v) >= 4: d['out_W'] = round(u16(v, 2) / 10.0, 2)
+        elif t == 0xA3 and len(v) >= 4: d['in_A3_W'] = round(u16(v, 2) / 10.0, 2)
+        elif t == 0xA5 and len(v) >= 4: d['in_A5_W'] = round(u16(v, 2) / 10.0, 2)
+        elif t == 0xA8: d['C1'] = decode_port(v)
+        elif t == 0xA9: d['C2'] = decode_port(v)
+        elif t == 0xA7: d['A'] = decode_port(v)
+        elif t == 0xAF and len(v) >= 2: d['temp1'] = v[1]
+        elif t == 0xB0 and len(v) >= 2: d['temp2'] = v[1]
+    return d
+
 class Sess:
     def __init__(self):
-        self.q = asyncio.Queue(); self.serial=None; self.version=None; self.mac=None
-        self.key=None; self.iv=None; self.crypto='INACTIVE'; self.session_key=None
-        self.telemetry = []
+        self.q = asyncio.Queue(); self.serial = None; self.version = None; self.mac = None
+        self.key = None; self.iv = None; self.crypto = 'INACTIVE'; self.sk = None
 
 S = Sess()
 
-def mode_str(b): return {0:'Off',1:'Input',2:'Output'}.get(b, f'Unknown(0x{b:02x})')
-
-def parse_port(v):
-    if len(v) < 12: return None
-    m = mode_str(v[2])
-    if m == 'Off': return {'mode':m}
-    volt = struct.unpack_from('<H', v, 3)[0] / 10.0
-    curr = struct.unpack_from('<H', v, 5)[0] / 10.0
-    return {'mode':m, 'V':round(volt,2), 'A':round(curr,3), 'W':round(volt*curr,2)}
-
-def parse_status(payload):
-    off = 1 if (payload and payload[0]==0x00) else 0
-    res = {}
-    for t, v in parse_tlv(payload, off):
-        if t == 0xA2 and len(v) >= 10:
-            res['battery_%'] = f"{v[8]}.{v[9]:02d}"
-        elif t == 0xA4: res['C1'] = parse_port(v)
-        elif t == 0xA5: res['C2'] = parse_port(v)
-        elif t == 0xA6: res['A']  = parse_port(v)
-        elif t == 0xAE and len(v) >= 5:
-            res['out_W'] = struct.unpack_from('<H', v, 1)[0]/10.0
-            res['in_W']  = struct.unpack_from('<H', v, 3)[0]/10.0
-        elif t == 0xB3 and len(v) >= 3:
-            res['temp'] = f"{v[1]}C/{v[2]}F"
-    return res
-
 def notif(_, data):
     raw = bytes(data)
-    if len(raw) < 5: S.q.put_nowait(('short', raw)); return
+    if len(raw) < 5: return
     body = raw[4:-1]
-    if len(body) < 5: S.q.put_nowait(('short', body)); return
+    if len(body) < 5: return
     hi, lo = body[3], body[4]
     encd = (hi & 0x40) != 0
     full = ((hi & ~0x40) << 8) | lo
-    content = body
     if encd and S.key is not None:
         try: content = dec(S.key, S.iv, body[5:])
-        except Exception as e: S.q.put_nowait(('decfail', repr(e))); return
+        except Exception: return
         if S.crypto == 'Initial':
-            off = 1 if (content and content[0]==0x00) else 0
+            off = 1 if (content and content[0] == 0x00) else 0
             for t, v in parse_tlv(content, off):
-                if t == 0xA1 and len(v) == 16: S.session_key = v
-        if full in (0x0500, 0x0D00, 0x050E):
-            st = parse_status(content)
-            if st: S.telemetry.append((full, st))
-        S.q.put_nowait(('dec', full, content))
+                if t == 0xA1 and len(v) == 16: S.sk = v
+        S.q.put_nowait((full, content))
     else:
         for t, v in parse_tlv(body, 6):
-            if t == 0xA3: S.version = v.decode('latin1','replace')
-            elif t == 0xA4: S.serial = v.decode('latin1','replace')
+            if t == 0xA3: S.version = v.decode('latin1', 'replace')
+            elif t == 0xA4 and len(v) >= 16: S.serial = v.decode('latin1', 'replace')
             elif t == 0xA5: S.mac = ':'.join(f'{b:02x}' for b in v[:6])
-        S.q.put_nowait(('plain', full, body))
+        S.q.put_nowait((full, body))
 
-async def wait(t=3.0):
+async def wait(t=1.5):
     try: return await asyncio.wait_for(S.q.get(), t)
-    except asyncio.TimeoutError: return ('timeout',)
+    except asyncio.TimeoutError: return None
 
 async def find():
     d = await BleakScanner.find_device_by_filter(
         lambda dev, adv: ADVERTISED_16 in [u.lower() for u in (adv.service_uuids or [])]
         or (dev.name or '').upper().startswith('AFYDN'), timeout=15.0)
-    return d.address if d else None
+    return d
 
-async def run(addr):
-    if addr is None:
+def fmt_port(name, p):
+    if not p or p['mode'] == 'off':
+        return f"  {name}: off"
+    return f"  {name}: {p['V']}V  {p['A']}A  {p['W']}W"
+
+async def run(addr, monitor, duration):
+    dev = None
+    if addr:
+        dev = await BleakScanner.find_device_by_address(addr, timeout=12.0)
+    if dev is None:
         print("Scanning for Anker Prime (0xFF09 / AFYDN*)...")
-        addr = await find()
-        if not addr: print("Device not found."); return
-    print(f"Connecting {addr} ...")
-    async with BleakClient(addr, timeout=20.0) as cli:
+        dev = await find()
+        if not dev: print("Device not found."); return
+    print(f"Connecting {dev.address} ...")
+    async with BleakClient(dev, timeout=20.0) as cli:
         print("Connected:", cli.is_connected)
         await cli.start_notify(NOTIFY, notif)
         ts = struct.pack('<I', int(time.time()))
         async def snd(p): await cli.write_gatt_char(WRITE, frame(p), response=False)
 
         # unencrypted handshake
-        await snd(build_request(0x0001, [(0xA1,ts),(0xA2,A2_STATIC)])); await wait()
-        await snd(build_request(0x0003, [(0xA1,ts),(0xA2,A2_STATIC),(0xA3,b'\x20'),(0xA4,b'\x00\xf0')])); await wait()
-        await snd(build_request(0x0029, [(0xA1,ts),(0xA2,A2_STATIC)])); await wait()
-        await snd(build_request(0x0005, [(0xA1,ts),(0xA2,A2_STATIC),(0xA3,b'\x20'),(0xA4,b'\x00\xf0'),(0xA5,b'\x02')])); await wait()
+        await snd(build_request(0x0001, [(0xA1, ts), (0xA2, A2_STATIC)])); await wait()
+        await snd(build_request(0x0003, [(0xA1, ts), (0xA2, A2_STATIC), (0xA3, b'\x20'), (0xA4, b'\x00\xf0')])); await wait()
+        for _ in range(3):
+            await snd(build_request(0x0029, [(0xA1, ts), (0xA2, A2_STATIC)]))
+            for _ in range(4):
+                await wait(0.6)
+                if S.serial: break
+            if S.serial: break
+        await snd(build_request(0x0005, [(0xA1, ts), (0xA2, A2_STATIC), (0xA3, b'\x20'), (0xA4, b'\x00\xf0'), (0xA5, b'\x02')])); await wait()
         if not S.serial: print("Handshake failed (no serial)."); return
         print(f"Serial : {S.serial}")
         print(f"FW ver : {S.version}")
@@ -154,32 +178,56 @@ async def run(addr):
 
         # crypto: IV = first 16 bytes of the 17-byte serial
         S.key = INITIAL_KEY; S.iv = S.serial.encode('latin1')[:16]; S.crypto = 'Initial'
-        tlv = build_tlv([(0xA1,ts),(0xA2,A2_STATIC),(0xA3,bytes(4)),(0xA5,bytes(40))])
-        await snd(bytes([0x03,0x00,0x01,0x40,0x22]) + enc(S.key,S.iv,tlv))
-        for _ in range(6):
-            await wait(1.2)
-            if S.session_key: break
-        if not S.session_key: print("No session key."); return
-        print(f"Session: established (key {S.session_key.hex()})")
-        S.key = S.session_key; S.crypto = 'Session'
-
-        # comprehensive status + listen a few seconds for live telemetry
-        stat_tlv = build_tlv([(0xA1, b'\x21')])
-        await snd(bytes([0x03,0x00,0x11,0x45,0x00]) + enc(S.key,S.iv,stat_tlv))
-        t_end = time.time() + 6
-        while time.time() < t_end:
+        tlv = build_tlv([(0xA1, ts), (0xA2, A2_STATIC), (0xA3, bytes(4)), (0xA5, bytes(40))])
+        await snd(bytes([0x03, 0x00, 0x01, 0x40, 0x22]) + enc(S.key, S.iv, tlv))
+        for _ in range(8):
             await wait(1.0)
-        await cli.stop_notify(NOTIFY)
+            if S.sk: break
+        if not S.sk: print("No session key."); return
+        S.key = S.sk; S.crypto = 'Session'
+        print(f"Session: established\n")
 
-        print("\n=== Telemetry ===")
-        if not S.telemetry:
-            print("(no structured telemetry frames decoded)")
-        seen = {}
-        for cmd, st in S.telemetry:
-            seen.update(st)
-        for k, v in seen.items():
-            print(f"  {k}: {v}")
+        async def send_enc(g, cmd, tlvs):
+            await snd(bytes([0x03, 0x00, g, ((cmd >> 8) & 0xFF) | 0x40, cmd & 0xFF]) + enc(S.key, S.iv, build_tlv(tlvs)))
+
+        # prime with a full-status request, then subscribe to live telemetry
+        await send_enc(0x11, 0x0200, [(0xA1, b'\x21')]); await wait(0.8)
+        await send_enc(0x11, 0x0700, [(0xA1, b'\x21')])
+        t_end = time.time() + (duration if monitor else 8.0)
+        shown = False
+        while time.time() < t_end:
+            ev = await wait(1.0)
+            if ev is None:
+                await send_enc(0x11, 0x0700, [(0xA1, b'\x21')]); continue
+            full, payload = ev
+            if full != 0x0300:
+                continue
+            d = parse_live(payload)
+            line = (f"[{time.strftime('%H:%M:%S')}] battery {d.get('battery')}%   "
+                    f"out {d.get('out_W')}W   temp {d.get('temp1')}/{d.get('temp2')}C")
+            print(line)
+            print(fmt_port("USB-C1", d.get('C1')))
+            print(fmt_port("USB-C2", d.get('C2')))
+            print(fmt_port("USB-A ", d.get('A')))
+            shown = True
+            if not monitor:
+                break
+        await cli.stop_notify(NOTIFY)
+        if not shown:
+            print("No live telemetry frame received.")
+
+def main():
+    args = [a for a in sys.argv[1:]]
+    monitor = '--monitor' in args
+    args = [a for a in args if a != '--monitor']
+    addr = None
+    duration = 3600.0 if monitor else 3.0
+    for a in args:
+        if a.replace('.', '').isdigit():
+            duration = float(a)
+        else:
+            addr = a
+    asyncio.run(run(addr, monitor, duration))
 
 if __name__ == "__main__":
-    a = sys.argv[1] if len(sys.argv) > 1 else None
-    asyncio.run(run(a))
+    main()

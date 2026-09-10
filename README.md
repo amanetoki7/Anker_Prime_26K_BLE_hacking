@@ -42,11 +42,33 @@ The static initial AES-128-CBC key is unchanged: the ASCII string `2c377dfa09cdb
 The unencrypted handshake and the full encrypted session (initial key -> session key -> encrypted commands) have been
 confirmed working on the 26250mAh model with these changes.
 
-**Known gap:** on firmware `v0.0.5.2` the live telemetry / comprehensive status commands differ from the 27650mAh
-firmware. The status request that returns battery / port / power data on the 27650mAh model (`0x0500`) is acknowledged
-by the 26250mAh device with a short `00 a1 01 31` reply instead of the telemetry dump, so the port/battery parsers are
-not yet mapped for this firmware. Connection, authentication and the encrypted channel all work; mapping the telemetry
-command set is future work.
+# Telemetry (firmware v0.0.5.2)
+
+The 27650mAh status command (`0x0500`) only returns a short ack (`00 a1 01 31`) on this firmware. The 26250mAh unit
+uses different commands and a different TLV layout, mapped here against the live device. All are group `0x11`, AES-CBC
+encrypted:
+
+| Command | Response | Meaning |
+| --- | --- | --- |
+| `0x0200` | `0x0A00` | full status snapshot (settings, battery, temps, limits) |
+| `0x0700` | `0x0300` | subscribe to live power status; the device then **streams** `0x0300` frames |
+
+In a live (`0x0300`) frame each TLV value is `[typeByte, data...]`, where `typeByte 0x04` marks a struct. A port struct
+is `[0x04, mode, u16le voltage x0.1V, u16le current x0.1A, u16le power x0.1W, ...]` with `mode != 0` meaning active.
+
+| TLV tag | Field |
+| --- | --- |
+| `A2` | battery percent (`data[0]`) |
+| `A6` | total output power (`x0.1 W`) |
+| `A8` | USB-C1 port |
+| `A9` | USB-C2 port |
+| `A7` | USB-A port |
+| `AF` / `B0` | temperature 1 / 2 (deg C) |
+| `A3` / `A5` | input-side power scalars (tentative; confirm with a charge test) |
+
+Verified live against the device: e.g. USB-C1 `15.0 V / 1.0 A / 15.5 W`, USB-C2 `5.0 V / 0.4 A / 2.2 W`, total output
+matching the sum, battery and two temperatures all correct. Port labels C1/C2 were confirmed against the on-device
+screen readout. Mapping the input-side fields (`A3` / `A5`) still needs a capture while the bank is charging.
 
 # WebTool
 
@@ -61,13 +83,26 @@ or `file://` and click Connect.
 
 # Python CLI
 
-[anker26k.py](anker26k.py) is a standalone client that scans for the power bank, runs the unencrypted handshake, then
-establishes the full encrypted session and prints the serial, firmware version and MAC.
+[anker26k.py](anker26k.py) is a standalone client that scans for the power bank, runs the unencrypted handshake,
+establishes the full encrypted session, and reads live telemetry (battery, temperatures, total output and per-port
+voltage / current / power).
 
 ```bash
 pip install bleak cryptography
-python anker26k.py                 # scan for an Anker Prime (0xFF09 / AFYDN*) and connect
+python anker26k.py                     # scan, connect, print one telemetry snapshot
 python anker26k.py 7C:E9:13:99:6E:A8   # connect to a specific MAC
+python anker26k.py --monitor           # stream live telemetry until interrupted
+```
+
+Example output:
+
+```text
+Serial : AFYDNWH0G05600621
+FW ver : v0.0.5.2
+battery 98%   out 17.7W   temp 27/26C
+  USB-C1: 15.0V  1.0A  15.5W
+  USB-C2: 5.0V   0.4A   2.2W
+  USB-A : off
 ```
 
 Requires a Bluetooth LE adapter. On Windows it uses the WinRT backend via bleak; Bluetooth must be powered on and the
