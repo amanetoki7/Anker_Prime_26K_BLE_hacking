@@ -144,6 +144,29 @@
             gap: 1rem;
         }
 
+        /* Battery Level / Temperature / Total Input / Total Output : 2 columns x 2 rows */
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.25rem;
+        }
+
+        /* USB-C 1 / USB-C 2 / USB-A / Base : four frames in this order */
+        .ports-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 1rem;
+        }
+
+        @media (max-width: 900px) {
+            .ports-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+
+        @media (max-width: 520px) {
+            .ports-grid { grid-template-columns: minmax(0, 1fr); }
+        }
+
         .port-card {
             background-color: #1a1b26;
             border-radius: 8px;
@@ -388,7 +411,7 @@
 
         <div class="status-card">
             <h2>Live Power Status</h2>
-            <div class="status-grid">
+            <div class="summary-grid">
                 <div class="status-item battery-level"><span class="label">Battery Level</span><span
                         id="statusBatteryLevel" class="value status-inactive">N/A</span></div>
                 <div class="status-item"><span class="label">Temperature</span><span id="statusTemperature"
@@ -397,6 +420,8 @@
                         class="value status-inactive">N/A</span></div>
                 <div class="status-item"><span class="label">Total Output</span><span id="statusTotalOutput"
                         class="value status-inactive">N/A</span></div>
+            </div>
+            <div class="ports-grid">
                 <div class="port-card" id="portC1">
                     <h3>USB-C 1</h3>
                     <div class="status-item"><span class="label">Mode</span><span id="statusUsbC1Mode"
@@ -420,7 +445,7 @@
                             class="value status-inactive">N/A</span></div>
                 </div>
                 <div class="port-card" id="portA">
-                    <h3>Base / Input</h3>
+                    <h3>USB-A</h3>
                     <div class="status-item"><span class="label">Mode</span><span id="statusUsbAMode"
                             class="value status-inactive">N/A</span></div>
                     <div class="status-item"><span class="label">Voltage</span><span id="statusUsbAVoltage"
@@ -428,6 +453,17 @@
                     <div class="status-item"><span class="label">Current (Calc)</span><span id="statusUsbACurrent"
                             class="value status-inactive">N/A</span></div>
                     <div class="status-item"><span class="label">Power</span><span id="statusUsbAPower"
+                            class="value status-inactive">N/A</span></div>
+                </div>
+                <div class="port-card" id="portBase">
+                    <h3>Base</h3>
+                    <div class="status-item"><span class="label">Mode</span><span id="statusBaseMode"
+                            class="value status-inactive">N/A</span></div>
+                    <div class="status-item"><span class="label">Voltage</span><span id="statusBaseVoltage"
+                            class="value status-inactive">N/A</span></div>
+                    <div class="status-item"><span class="label">Current (Calc)</span><span id="statusBaseCurrent"
+                            class="value status-inactive">N/A</span></div>
+                    <div class="status-item"><span class="label">Power</span><span id="statusBasePower"
                             class="value status-inactive">N/A</span></div>
                 </div>
             </div>
@@ -486,13 +522,14 @@
         const statusUsbC1Mode = document.getElementById('statusUsbC1Mode'), statusUsbC1Voltage = document.getElementById('statusUsbC1Voltage'), statusUsbC1Power = document.getElementById('statusUsbC1Power'), statusUsbC1Current = document.getElementById('statusUsbC1Current');
         const statusUsbC2Mode = document.getElementById('statusUsbC2Mode'), statusUsbC2Voltage = document.getElementById('statusUsbC2Voltage'), statusUsbC2Power = document.getElementById('statusUsbC2Power'), statusUsbC2Current = document.getElementById('statusUsbC2Current');
         const statusUsbAMode = document.getElementById('statusUsbAMode'), statusUsbAVoltage = document.getElementById('statusUsbAVoltage'), statusUsbAPower = document.getElementById('statusUsbAPower'), statusUsbACurrent = document.getElementById('statusUsbACurrent');
+        const statusBaseMode = document.getElementById('statusBaseMode'), statusBaseVoltage = document.getElementById('statusBaseVoltage'), statusBasePower = document.getElementById('statusBasePower'), statusBaseCurrent = document.getElementById('statusBaseCurrent');
         const setThemeSimpleButton = document.getElementById('setThemeSimpleButton'), setThemeAdvancedButton = document.getElementById('setThemeAdvancedButton');
         const setBeepOnButton = document.getElementById('setBeepOnButton'), setBeepOffButton = document.getElementById('setBeepOffButton');
         const customCommandGroupInput = document.getElementById('customCommandGroupInput'), customCommandInput = document.getElementById('customCommandInput'), customTlvInput = document.getElementById('customTlvInput');
         const customEncryptCheckbox = document.getElementById('customEncryptCheckbox'), sendCustomCommandButton = document.getElementById('sendCustomCommandButton');
         let device, server, writeCharacteristic, notifyCharacteristic, resolveNextNotificationPromise, activeKey, activeIv, cryptoState = 'INACTIVE', deviceInfo = {}, sessionUtcTimestampBytes = null, currentTransactionWrapper = null;
 
-        const initialPowerStatus = { temperature: null, batteryLevel: null, totalInputPower: null, totalOutputPower: null, portC1: { mode: 'N/A', voltage: 'N/A', power: 'N/A', current: 'N/A' }, portC2: { mode: 'N/A', voltage: 'N/A', power: 'N/A', current: 'N/A' }, portA: { mode: 'N/A', voltage: 'N/A', power: 'N/A', current: 'N/A' } };
+        const initialPowerStatus = { temperature: null, batteryLevel: null, totalInputPower: null, totalOutputPower: null, portC1: { mode: 'N/A', voltage: 'N/A', power: 'N/A', current: 'N/A' }, portC2: { mode: 'N/A', voltage: 'N/A', power: 'N/A', current: 'N/A' }, portA: { mode: 'N/A', voltage: 'N/A', power: 'N/A', current: 'N/A' }, portBase: { mode: 'N/A', voltage: 'N/A', power: 'N/A', current: 'N/A' } };
         let powerStatus = JSON.parse(JSON.stringify(initialPowerStatus));
 
         const A2_STATIC_VALUE_HEX = '32633337376466613039636462373932343838396534323932613337663631633863356564353264';
@@ -548,10 +585,13 @@
             update(statusUsbC1Mode, powerStatus.portC1.mode); update(statusUsbC1Voltage, powerStatus.portC1.voltage); update(statusUsbC1Power, powerStatus.portC1.power); update(statusUsbC1Current, powerStatus.portC1.current);
             update(statusUsbC2Mode, powerStatus.portC2.mode); update(statusUsbC2Voltage, powerStatus.portC2.voltage); update(statusUsbC2Power, powerStatus.portC2.power); update(statusUsbC2Current, powerStatus.portC2.current);
             update(statusUsbAMode, powerStatus.portA.mode); update(statusUsbAVoltage, powerStatus.portA.voltage); update(statusUsbAPower, powerStatus.portA.power); update(statusUsbACurrent, powerStatus.portA.current);
+            update(statusBaseMode, powerStatus.portBase.mode); update(statusBaseVoltage, powerStatus.portBase.voltage); update(statusBasePower, powerStatus.portBase.power); update(statusBaseCurrent, powerStatus.portBase.current);
 
-            document.getElementById('portC1').className = powerStatus.portC1.mode === 'Off' ? 'port-card port-off' : 'port-card';
-            document.getElementById('portC2').className = powerStatus.portC2.mode === 'Off' ? 'port-card port-off' : 'port-card';
-            document.getElementById('portA').className = powerStatus.portA.mode === 'Off' ? 'port-card port-off' : 'port-card';
+            const cardCls = m => (m === 'Off' || m === 'N/A') ? 'port-card port-off' : 'port-card';
+            document.getElementById('portC1').className = cardCls(powerStatus.portC1.mode);
+            document.getElementById('portC2').className = cardCls(powerStatus.portC2.mode);
+            document.getElementById('portA').className = cardCls(powerStatus.portA.mode);
+            document.getElementById('portBase').className = cardCls(powerStatus.portBase.mode);
         }
 
         async function setupCrypto(keyBytes, ivBytes, state) { try { activeKey = await window.crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC", length: 128 }, false, ["encrypt", "decrypt"]); activeIv = ivBytes; deviceInfo.activeKeyHex = toHexString(keyBytes); deviceInfo.activeIvHex = toHexString(ivBytes); cryptoState = state; log(`Crypto context set to state "${state}"`, 'success'); } catch (error) { log(`ERROR during crypto initialization: ${error.message}`, 'error'); } updateStatusDisplay(); }
@@ -662,7 +702,7 @@
         // Port struct: [0x04, mode, u16le V x0.1, u16le A x0.1, u16le W x0.1, ...]. mode!=0 => active.
         // Tags: A2 battery%, A5 total input(x0.1W), A6 total output(x0.1W),
         //       A7 input source (pogo Base / C-port charging), A8 USB-C1, A9 USB-C2,
-        //       AF/B0 temperatures (C). USB-A is output-only and is not captured here.
+        //       AC USB-A (output only), AF/B0 temperatures (C).
         function parseLive26k(payload) {
             const off = (payload.length > 0 && payload[0] === 0x00) ? 1 : 0;
             const ns = JSON.parse(JSON.stringify(initialPowerStatus));
@@ -682,9 +722,10 @@
                     case 0xA2: if (value.length >= 2) ns.batteryLevel = value[1] + ' %'; break;
                     case 0xA5: if (value.length >= 4) ns.totalInputPower = (u16(value, 2) / 10).toFixed(2) + ' W'; break;
                     case 0xA6: if (value.length >= 4) ns.totalOutputPower = (u16(value, 2) / 10).toFixed(2) + ' W'; break;
-                    case 0xA7: ns.portA = port(value, 'Input'); break;  // pogo Base / C-port charging
+                    case 0xA7: ns.portBase = port(value, 'Input'); break;  // pogo Base / C-port charging
                     case 0xA8: ns.portC1 = port(value); break;
                     case 0xA9: ns.portC2 = port(value); break;
+                    case 0xAC: ns.portA = port(value); break;  // USB-A (output only)
                     case 0xAF: if (value.length >= 2) t1 = value[1]; break;
                     case 0xB0: if (value.length >= 2) t2 = value[1]; break;
                 }

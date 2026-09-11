@@ -23,7 +23,8 @@ Telemetry (firmware v0.0.5.2), all under group 0x11, AES-CBC encrypted:
     A8 = USB-C1 port          (same port layout as A7)
     A9 = USB-C2 port          (same port layout)
     AF = temperature 1 (C),  B0 = temperature 2 (C)
-  Input paths: pogo Base + USB-C1/C2 (bidirectional). USB-A is output-only and was not captured.
+    AC = USB-A port (output only, same port layout)
+  Input paths: pogo Base + USB-C1/C2 (bidirectional). USB-A is output only.
 """
 import asyncio, sys, struct, time
 from bleak import BleakClient, BleakScanner
@@ -96,6 +97,7 @@ def parse_live(payload):
         elif t == 0xA5 and len(v) >= 4: d['in_W'] = round(u16(v, 2) / 10.0, 2)
         elif t == 0xA6 and len(v) >= 4: d['out_W'] = round(u16(v, 2) / 10.0, 2)
         elif t == 0xA7: d['base_in'] = decode_port(v)
+        elif t == 0xAC: d['A'] = decode_port(v)
         elif t == 0xA8: d['C1'] = decode_port(v)
         elif t == 0xA9: d['C2'] = decode_port(v)
         elif t == 0xAF and len(v) >= 2: d['temp1'] = v[1]
@@ -210,6 +212,7 @@ async def run(addr, monitor, duration):
             print(line)
             print(fmt_port("USB-C1 ", d.get('C1')))
             print(fmt_port("USB-C2 ", d.get('C2')))
+            print(fmt_port("USB-A  ", d.get('A')))
             bi = d.get('base_in')
             if bi and bi['mode'] != 'off':
                 print(fmt_port("Base in", bi))
